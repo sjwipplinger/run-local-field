@@ -1,0 +1,650 @@
+import { useState, useEffect, useRef } from "react";
+
+// RUN LOCAL — FIELD
+// Per-day D2D tracker. Funnel-locked counts (Doors >= Interviews >= Sold),
+// Submit -> confirm -> first-time full-screen takeover. Calendar rates each day
+// by effort OR results. Roles: derek = read-only, admin = edits everything +
+// goals, test = takeover on every submit, anyone else = normal editable rep.
+
+const C = {
+  ink: "#15110D", ink2: "#1E1812", line: "#2E261D",
+  cream: "#F4ECE0", muted: "#9C9081", orange: "#F2541D",
+  amber: "#E8A24A", glow: "rgba(242,84,29,0.30)",
+};
+
+const RATING = {
+  gold:   { bg: "#4FA86E", label: "Gold",   star: true },
+  green:  { bg: "#4FA86E", label: "Green",  star: false },
+  yellow: { bg: "#E6B23C", label: "Yellow", star: false },
+  red:    { bg: "#CF4B2C", label: "Red",    star: false },
+  grey:   { bg: "#2A231B", label: "No log", star: false },
+};
+const RANK = { red: 0, yellow: 1, green: 2, gold: 3 };
+
+// Full-screen reveal — handwritten letter, themed ink per tier, emphasis inline.
+// Each line is an array of spans: { t: text, c: color, s: size, u: underline }.
+const REVEAL = {
+  gold: {
+    bg: "linear-gradient(125deg,#C0901C 0%,#F3D67C 22%,#DBA62C 45%,#FAE7A2 68%,#BC8A18 100%)",
+    sheen: true, star: "#3A2606", starGlow: "#FFFDEB", meta: "#5A3C0A", body: "#2E1D04",
+    panelBg: "rgba(46,29,4,0.9)", panelNum: "#F3D67C", panelLabel: "#C9A85E",
+    doneBg: "#2E1D04", doneText: "#F3D67C", base: 24,
+    lines: [
+      [{ t: "Absolutely", s: 30 }],
+      [{ t: "LEGENDARY!", s: 44 }],
+      [{ t: "The halls of " }, { t: "eternity", u: true }],
+      [{ t: "shall " }, { t: "forever", u: true }, { t: " echo with" }],
+      [{ t: "the tales of what you" }],
+      [{ t: "accomplished", u: true, s: 30 }, { t: " this day!" }],
+    ],
+  },
+  green: {
+    bg: "radial-gradient(120% 70% at 50% 20%, #1F2A1B 0%, #10150E 62%)",
+    star: null, meta: "#7E8C7E", body: "#E2EBE2",
+    panelBg: "rgba(0,0,0,0.35)", panelNum: "#74CE90", panelLabel: "#7E8C7E",
+    doneBg: "rgba(0,0,0,0.5)", doneText: "#E2EBE2", doneBorder: "#3A322A", base: 26,
+    lines: [
+      [{ t: "Strong work", c: "#5FB87E" }, { t: "," }],
+      [{ t: "you " }, { t: "fought hard", c: "#5FB87E" }],
+      [{ t: "and rose" }],
+      [{ t: "VICTORIOUS!", c: "#74CE90", s: 46 }],
+    ],
+  },
+  yellow: {
+    bg: "#F5C211", star: null, meta: "#5A4708", body: "#1A1306",
+    panelBg: "rgba(26,19,6,0.9)", panelNum: "#F5C211", panelLabel: "#B89A4A",
+    doneBg: "#1A1306", doneText: "#F5C211", base: 24,
+    lines: [
+      [{ t: "You better have a" }],
+      [{ t: "good " }, { t: "fucking", c: "#C8231B", s: 27 }, { t: " excuse" }],
+      [{ t: "for this." }],
+      [{ t: "NO ONE CARES", c: "#C8231B", s: 42 }],
+      [{ t: "about your childhood!" }],
+    ],
+  },
+  red: {
+    bg: "radial-gradient(120% 70% at 50% 18%, #2A2420 0%, #161311 62%)",
+    star: null, meta: "#8C8276", body: "#E8E0D2",
+    panelBg: "rgba(0,0,0,0.35)", panelNum: "#F6F1E7", panelLabel: "#8C8276",
+    doneBg: "rgba(0,0,0,0.55)", doneText: "#E8E0D2", doneBorder: "#3A322A", base: 21,
+    lines: [
+      [{ t: "I have witnessed plagues" }],
+      [{ t: "that devoured empires, storms" }],
+      [{ t: "that swallowed oceans whole," }],
+      [{ t: "and the fiery collapse of" }],
+      [{ t: "kingdoms that once ruled" }],
+      [{ t: "the stars themselves" }],
+      [{ t: "and yet " }, { t: "NEVER", c: "#F6F1E7", s: 44 }, { t: " in all my" }],
+      [{ t: "endless " }, { t: "fucking", c: "#D2524A" }, { t: " years have" }],
+      [{ t: "I beheld such a spectacular," }],
+      [{ t: "shit-smeared", c: "#D2524A", s: 34 }],
+      [{ t: "bastardization", c: "#D2524A", s: 34 }],
+      [{ t: "of a simple " }, { t: "goddamn", c: "#D2524A" }],
+      [{ t: "task!", c: "#F6F1E7", s: 30 }],
+    ],
+  },
+};
+
+const METRICS = [
+  { key: "doors", label: "Doors pulled", hint: "every knock" },
+  { key: "interviews", label: "Interviews done", hint: "real conversation" },
+  { key: "sold", label: "Sold", hint: "soft commit, future buy" },
+];
+const blank = { doors: 0, interviews: 0, sold: 0 };
+const DEFAULT_GOALS = { doors: 20, sold: 2 };
+
+const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');`;
+
+function ymd(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+function todayStr() { return ymd(new Date()); }
+function prettyDate(str) { const [y, m, dd] = str.split("-").map(Number); return new Date(y, m - 1, dd).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }); }
+function monthCells(year, month) {
+  const startDow = new Date(year, month, 1).getDay();
+  const days = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startDow; i++) cells.push(null);
+  for (let d = 1; d <= days; d++) cells.push(d);
+  return cells;
+}
+
+const dayKey = (rep, date) => `runlocal_field_day:${rep.toLowerCase()}:${date}`;
+const goalsKey = (rep) => `runlocal_field_goals:${rep.toLowerCase()}`;
+
+const MEM = { goals: {}, days: {} };
+async function loadGoals(rep) {
+  const key = rep.toLowerCase();
+  if (MEM.goals[key]) return { ...MEM.goals[key] };
+  try { const r = await window.storage.get(goalsKey(rep)); if (r && r.value) { const g = JSON.parse(r.value); const out = { doors: g.doors || 20, sold: g.sold || 2 }; MEM.goals[key] = out; return { ...out }; } } catch {}
+  return { ...DEFAULT_GOALS };
+}
+async function saveGoals(rep, g) {
+  const key = rep.toLowerCase();
+  const out = { doors: (g.doors | 0) || 1, sold: (g.sold | 0) || 1 };
+  MEM.goals[key] = out;
+  try { await window.storage.set(goalsKey(rep), JSON.stringify(out)); } catch {}
+  return out;
+}
+async function loadRecords(rep) {
+  const key = rep.toLowerCase();
+  const map = {};
+  try {
+    const list = await window.storage.list(`runlocal_field_day:${key}:`);
+    for (const k of (list && list.keys) || []) { try { const r = await window.storage.get(k); if (r && r.value) map[k.split(":").pop()] = JSON.parse(r.value); } catch {} }
+  } catch {}
+  Object.entries(MEM.days).forEach(([mk, v]) => { if (mk.startsWith(key + ":")) map[mk.split(":")[1]] = v; });
+  return map;
+}
+
+function tierOf(pct) { if (pct >= 100) return "gold"; if (pct >= 70) return "green"; if (pct >= 40) return "yellow"; return "red"; }
+function rateDay(rec, goals) {
+  if (!rec || !rec.submitted) return "grey";
+  const doorsPct = goals.doors > 0 ? (rec.doors / goals.doors) * 100 : 0;
+  const soldPct = goals.sold > 0 ? (rec.sold / goals.sold) * 100 : 0;
+  const t1 = tierOf(doorsPct), t2 = tierOf(soldPct);
+  return RANK[t1] >= RANK[t2] ? t1 : t2;
+}
+function ratio(a, b) { return !b || b <= 0 ? "—" : (a / b).toFixed(1); }
+
+export default function RunLocalField() {
+  const [login, setLogin] = useState(null);
+  const [nameInput, setNameInput] = useState("Derek");
+  const [adminEditRep, setAdminEditRep] = useState(null);
+
+  const lower = (login || "").toLowerCase();
+  const isAdmin = lower === "admin";
+  const adminEditing = isAdmin && !!adminEditRep;
+  const fieldMode = !!login && (!isAdmin || adminEditing);
+  const viewRep = isAdmin ? adminEditRep : login;
+  const readOnly = false;                       // every rep logs their own; admin can also edit via the admin path
+  const alwaysReveal = lower === "test";        // test fires the takeover every submit
+
+  const [tab, setTab] = useState("today");
+  const [activeDate, setActiveDate] = useState(todayStr());
+  const [counts, setCounts] = useState(blank);
+  const [submitted, setSubmitted] = useState(false);
+  const [goals, setGoals] = useState(DEFAULT_GOALS);
+  const [records, setRecords] = useState({});
+  const [hydrated, setHydrated] = useState(false);
+
+  const now = new Date();
+  const [calYear, setCalYear] = useState(now.getFullYear());
+  const [calMonth, setCalMonth] = useState(now.getMonth());
+
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [csvText, setCsvText] = useState("");
+  const [showExport, setShowExport] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [showReveal, setShowReveal] = useState(false);
+  const [revealTier, setRevealTier] = useState("green");
+
+  // hydrate the viewed rep's goals + records
+  useEffect(() => {
+    if (!fieldMode || !viewRep) return;
+    let alive = true; setHydrated(false); setTab("today");
+    (async () => {
+      const [recs, g] = await Promise.all([loadRecords(viewRep), loadGoals(viewRep)]);
+      if (!alive) return;
+      setRecords(recs); setGoals(g);
+      const t = todayStr(); setActiveDate(t);
+      const cur = recs[t];
+      setCounts(cur ? { doors: cur.doors | 0, interviews: cur.interviews | 0, sold: cur.sold | 0 } : blank);
+      setSubmitted(cur ? !!cur.submitted : false);
+      setHydrated(true);
+    })();
+    return () => { alive = false; };
+  }, [viewRep, fieldMode]);
+
+  useEffect(() => {
+    if (!fieldMode || !viewRep || !hydrated) return;
+    const cur = records[activeDate];
+    setCounts(cur ? { doors: cur.doors | 0, interviews: cur.interviews | 0, sold: cur.sold | 0 } : blank);
+    setSubmitted(cur ? !!cur.submitted : false);
+    setConfirmReset(false);
+  }, [activeDate]); // eslint-disable-line
+
+  // visible press feedback (active state is flaky on touch)
+  useEffect(() => {
+    let el = null, downAt = 0;
+    const onDown = (e) => { const t = e.target.closest(".rl-btn,.rl-tab,.rl-cell,.rl-link"); if (!t) return; el = t; downAt = Date.now(); t.classList.add("rl-pressed"); };
+    const onUp = () => { if (!el) return; const node = el; el = null; const remain = Math.max(0, 180 - (Date.now() - downAt)); setTimeout(() => node.classList.remove("rl-pressed"), remain); };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
+    return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("pointerup", onUp); document.removeEventListener("pointercancel", onUp); };
+  }, []);
+
+  function persistDay(date, rec) {
+    MEM.days[`${viewRep.toLowerCase()}:${date}`] = rec;
+    setRecords((prev) => ({ ...prev, [date]: rec }));
+    (async () => { try { await window.storage.set(dayKey(viewRep, date), JSON.stringify(rec)); } catch {} })();
+  }
+  function curRevealed() { const r = records[activeDate]; return !!(r && r.revealed); }
+
+  function clamp(next) {
+    const doors = Math.max(0, next.doors | 0);
+    const interviews = Math.max(0, Math.min(next.interviews | 0, doors));
+    const sold = Math.max(0, Math.min(next.sold | 0, interviews));
+    return { doors, interviews, sold };
+  }
+  function bump(key, delta) {
+    if (readOnly) return;
+    const next = clamp({ ...counts, [key]: (counts[key] || 0) + delta });
+    setCounts(next); setSubmitted(false); persistDay(activeDate, { ...next, submitted: false, revealed: curRevealed() });
+  }
+  function setVal(key, raw) {
+    if (readOnly) return;
+    const n = parseInt(String(raw).replace(/[^0-9]/g, ""), 10);
+    const next = clamp({ ...counts, [key]: isNaN(n) ? 0 : n });
+    setCounts(next); setSubmitted(false); persistDay(activeDate, { ...next, submitted: false, revealed: curRevealed() });
+  }
+  function confirmSave() {
+    if (readOnly) { setShowConfirm(false); return; }
+    const firstTime = !curRevealed();
+    const tier = rateDay({ ...counts, submitted: true }, goals);
+    persistDay(activeDate, { ...counts, submitted: true, revealed: true });
+    setSubmitted(true); setShowConfirm(false);
+    if (firstTime || alwaysReveal) { setRevealTier(tier); setShowReveal(true); }
+  }
+  function resetDay() {
+    if (readOnly) return;
+    setCounts(blank); setSubmitted(false); setConfirmReset(false);
+    persistDay(activeDate, { ...blank, submitted: false, revealed: false });
+  }
+
+  async function exportCSV() {
+    const rows = []; const goalCache = {};
+    try {
+      const list = await window.storage.list("runlocal_field_day:");
+      for (const k of (list && list.keys) || []) {
+        try {
+          const r = await window.storage.get(k); if (!r || !r.value) continue;
+          const parts = k.split(":"); const rRep = parts[1]; const rDate = parts[2];
+          const v = JSON.parse(r.value);
+          if (!goalCache[rRep]) goalCache[rRep] = await loadGoals(rRep);
+          rows.push({ rep: rRep, date: rDate, ...v, tier: RATING[rateDay(v, goalCache[rRep])].label });
+        } catch {}
+      }
+    } catch {}
+    Object.entries(records).forEach(([date, v]) => {
+      if (!rows.find((r) => r.rep === viewRep.toLowerCase() && r.date === date))
+        rows.push({ rep: viewRep.toLowerCase(), date, ...v, tier: RATING[rateDay(v, goals)].label });
+    });
+    rows.sort((a, b) => (a.rep + a.date).localeCompare(b.rep + b.date));
+    const head = ["Rep", "Date", "Doors", "Interviews", "Sold", "Submitted", "Rating", "Doors/sale", "Interviews/sale"];
+    const body = rows.map((r) => [r.rep, r.date, r.doors | 0, r.interviews | 0, r.sold | 0, r.submitted ? "yes" : "draft", r.tier, ratio(r.doors, r.sold), ratio(r.interviews, r.sold)].join(","));
+    const csv = [head.join(","), ...body].join("\n");
+    setCsvText(csv); setShowExport(true);
+    try {
+      const blob = new Blob([csv], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = `runlocal-field-${todayStr()}.csv`; a.rel = "noopener";
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {}
+  }
+  async function copyCSV() {
+    try { await navigator.clipboard.writeText(csvText); setCopied(true); setTimeout(() => setCopied(false), 1600); }
+    catch { const ta = document.getElementById("rl-csv"); if (ta) { ta.focus(); ta.select(); try { document.execCommand("copy"); setCopied(true); setTimeout(() => setCopied(false), 1600); } catch {} } }
+  }
+
+  const css = `
+${FONTS}
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+.rl-wrap { font-family:'Inter',system-ui,sans-serif; background:radial-gradient(120% 80% at 50% -10%, #221a12 0%, ${C.ink} 60%); color:${C.cream}; min-height:100%; width:100%; }
+.rl-mark { font-family:'Oswald',sans-serif; font-weight:700; font-style:italic; text-transform:uppercase; letter-spacing:0.02em; line-height:0.92; }
+.rl-eyebrow { font-family:'Oswald',sans-serif; font-weight:600; letter-spacing:0.42em; text-transform:uppercase; color:${C.amber}; }
+.rl-num { font-family:'Oswald',sans-serif; font-weight:600; font-variant-numeric:tabular-nums; }
+.rl-label { font-family:'Oswald',sans-serif; font-weight:600; letter-spacing:0.16em; text-transform:uppercase; }
+.rl-btn { font-family:'Oswald',sans-serif; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; cursor:pointer; border:none; }
+.rl-btn, .rl-tab, .rl-cell, .rl-link { transition:background-color .12s ease, color .12s ease, filter .12s ease, transform .08s ease; }
+.rl-btn:active { transform:scale(0.96); }
+.rl-plus { background:${C.orange}; color:${C.ink}; box-shadow:0 0 0 1px ${C.orange}, 0 8px 24px -8px ${C.glow}; }
+.rl-plus.rl-pressed { background:#C8410E; box-shadow:0 0 0 1px #C8410E; transform:scale(0.96); }
+.rl-minus { background:transparent; color:${C.muted}; border:1px solid ${C.line}; }
+.rl-minus.rl-pressed { background:${C.cream}; color:${C.ink}; border-color:${C.cream}; transform:scale(0.96); }
+.rl-ghost { background:transparent; color:${C.amber}; border:1px solid ${C.amber}; }
+.rl-ghost.rl-pressed { background:${C.amber}; color:${C.ink}; transform:scale(0.96); }
+.rl-tab.rl-pressed { background:${C.line}; color:${C.cream}; }
+.rl-link.rl-pressed { color:${C.orange}; }
+.rl-cell.rl-pressed { filter:brightness(0.78); transform:scale(0.94); }
+.rl-card { background:${C.ink2}; border:1px solid ${C.line}; border-radius:18px; }
+.rl-in { font-family:'Oswald',sans-serif; font-weight:600; background:transparent; border:none; color:${C.cream}; text-align:center; width:100%; outline:none; font-variant-numeric:tabular-nums; }
+.rl-in:focus { color:${C.orange}; }
+.rl-pulse { animation:rlpulse .28s ease; }
+@keyframes rlpulse { 0%{transform:scale(1)} 40%{transform:scale(1.09)} 100%{transform:scale(1)} }
+.rl-gate-in { font-family:'Oswald',sans-serif; font-weight:600; letter-spacing:0.14em; text-transform:uppercase; background:${C.ink2}; border:1px solid ${C.line}; border-radius:12px; color:${C.cream}; padding:16px 18px; width:100%; outline:none; text-align:center; }
+.rl-gate-in:focus { border-color:${C.orange}; }
+.rl-link { background:none; border:none; color:${C.muted}; font-family:'Oswald',sans-serif; letter-spacing:0.14em; text-transform:uppercase; font-weight:500; cursor:pointer; font-size:12px; }
+.rl-link:hover { color:${C.cream}; }
+.rl-tab { flex:1; padding:11px; text-align:center; font-family:'Oswald',sans-serif; font-weight:600; letter-spacing:0.14em; text-transform:uppercase; font-size:12px; color:${C.muted}; cursor:pointer; border-radius:11px; }
+.rl-tab.on { background:${C.orange}; color:${C.ink}; }
+.rl-cell { aspect-ratio:1; border-radius:11px; display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:'Oswald',sans-serif; font-weight:600; font-size:15px; cursor:pointer; }
+.rl-goalin { font-family:'Oswald',sans-serif; font-weight:600; background:${C.ink}; border:1px solid ${C.line}; border-radius:12px; color:${C.cream}; padding:14px; width:100%; outline:none; text-align:center; font-size:24px; font-variant-numeric:tabular-nums; }
+.rl-goalin:focus { border-color:${C.orange}; }
+.rl-hand { font-family:'Patrick Hand','Bradley Hand','Comic Sans MS',cursive; }
+.rl-rise { animation:rlrise .42s ease both; }
+@keyframes rlrise { 0%{opacity:0; transform:translateY(14px)} 100%{opacity:1; transform:none} }
+.rl-sheen { position:absolute; top:0; width:150px; height:100%; background:linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,0.5),rgba(255,255,255,0)); transform:skewX(-12deg); animation:rlsheen 3.6s linear infinite; pointer-events:none; }
+@keyframes rlsheen { 0%{left:-180px} 100%{left:120%} }
+@media (prefers-reduced-motion: reduce){ .rl-pulse,.rl-rise,.rl-sheen{animation:none} .rl-btn{transition:none} }
+`;
+
+  // ---------- GATE ----------
+  if (!login) {
+    return (
+      <div className="rl-wrap" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 24 }}>
+        <style>{css}</style>
+        <div style={{ width: "100%", maxWidth: 360, textAlign: "center" }}>
+          <div className="rl-eyebrow" style={{ fontSize: 12, marginBottom: 14 }}>Field</div>
+          <div className="rl-mark" style={{ fontSize: 64, color: C.orange }}>Run<br />Local</div>
+          <div style={{ height: 3, width: 54, background: C.amber, margin: "18px auto 18px", borderRadius: 2 }} />
+          <div className="rl-label" style={{ fontSize: 12, color: C.muted, marginBottom: 26 }}>{prettyDate(todayStr())}</div>
+          <input className="rl-gate-in" value={nameInput}
+            onChange={(e) => setNameInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && nameInput.trim()) setLogin(nameInput.trim()); }}
+            aria-label="Your name" placeholder="Name" />
+          <button className="rl-btn rl-plus" style={{ width: "100%", padding: 16, borderRadius: 12, marginTop: 14, fontSize: 16 }}
+            onClick={() => nameInput.trim() && setLogin(nameInput.trim())}>Enter</button>
+          <button className="rl-btn rl-ghost" style={{ width: "100%", padding: 14, borderRadius: 12, marginTop: 12, fontSize: 13 }}
+            onClick={() => setLogin("admin")}>Admin · Edit goals & data</button>
+          <button className="rl-link" style={{ marginTop: 16 }} onClick={() => setLogin("test")}>Test mode · takeover every submit</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- ADMIN HUB ----------
+  if (isAdmin && !adminEditing) {
+    return <AdminView css={css} onSwitch={() => { setLogin(null); setAdminEditRep(null); }} onEditRep={(r) => setAdminEditRep(r)} />;
+  }
+
+  // ---------- FIELD ----------
+  return (
+    <div className="rl-wrap" style={{ minHeight: "100vh", paddingBottom: 40 }}>
+      <style>{css}</style>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "22px 18px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+          <div>
+            <div className="rl-mark" style={{ fontSize: 24, color: C.orange }}>Run Local</div>
+            <div className="rl-eyebrow" style={{ fontSize: 9, marginTop: 2 }}>
+              {adminEditing ? `Admin editing · ${viewRep}` : readOnly ? `Field · ${viewRep} · view only` : `Field · ${viewRep}`}
+            </div>
+          </div>
+          <button className="rl-link" onClick={() => { if (adminEditing) setAdminEditRep(null); else setLogin(null); }}>{adminEditing ? "Back" : "Switch"}</button>
+        </div>
+        <div className="rl-label" style={{ fontSize: 12, color: C.muted, marginBottom: 16 }}>{prettyDate(activeDate)}</div>
+
+        <div className="rl-card" style={{ display: "flex", padding: 4, gap: 4, marginBottom: 16 }}>
+          <div className={"rl-tab" + (tab === "today" ? " on" : "")} onClick={() => setTab("today")}>Today</div>
+          <div className={"rl-tab" + (tab === "calendar" ? " on" : "")} onClick={() => setTab("calendar")}>Calendar</div>
+        </div>
+
+        {tab === "today" && (
+          <>
+            {METRICS.map((m) => {
+              const canAdd = m.key === "doors" ? true
+                : m.key === "interviews" ? counts.interviews < counts.doors
+                : counts.sold < counts.interviews;
+              const capLabel = m.key === "interviews" ? "Capped at doors pulled"
+                : m.key === "sold" ? "Capped at interviews" : "";
+              return <Counter key={m.key} m={m} value={counts[m.key]} canAdd={canAdd} capLabel={capLabel}
+                disabled={readOnly} onBump={(d) => bump(m.key, d)} onSet={(v) => setVal(m.key, v)} />;
+            })}
+
+            <div className="rl-card" style={{ display: "flex", marginTop: 4, overflow: "hidden" }}>
+              <Ratio big={ratio(counts.doors, counts.sold)} label="Doors / sale" />
+              <div style={{ width: 1, background: C.line }} />
+              <Ratio big={ratio(counts.interviews, counts.sold)} label="Interviews / sale" />
+              <div style={{ width: 1, background: C.line }} />
+              <Ratio big={ratio(counts.doors, counts.interviews)} label="Doors / interview" />
+            </div>
+
+            {readOnly ? (
+              <div className="rl-card" style={{ textAlign: "center", padding: 16, marginTop: 16 }}>
+                <span className="rl-label" style={{ fontSize: 13, color: C.muted }}>View only — admin can edit</span>
+              </div>
+            ) : (
+              <button className="rl-btn rl-plus" style={{ width: "100%", padding: 17, borderRadius: 14, marginTop: 16, fontSize: 16 }} onClick={() => setShowConfirm(true)}>
+                {submitted ? "Submitted ✓  ·  tap to update" : "Submit day"}
+              </button>
+            )}
+
+            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+              <button className="rl-btn rl-minus" style={{ flex: 1, padding: 13, borderRadius: 12, fontSize: 13 }} onClick={exportCSV}>Export CSV</button>
+              {!readOnly && (!confirmReset ? (
+                <button className="rl-btn rl-minus" style={{ flex: 1, padding: 13, borderRadius: 12, fontSize: 13 }} onClick={() => setConfirmReset(true)}>Reset day</button>
+              ) : (
+                <button className="rl-btn rl-plus" style={{ flex: 1, padding: 13, borderRadius: 12, fontSize: 13 }} onClick={resetDay}>Confirm</button>
+              ))}
+            </div>
+            {confirmReset && <button className="rl-link" style={{ marginTop: 10 }} onClick={() => setConfirmReset(false)}>Cancel</button>}
+          </>
+        )}
+
+        {tab === "calendar" && (
+          <CalendarView year={calYear} month={calMonth} records={records} goals={goals}
+            onPrev={() => { const m = calMonth - 1; if (m < 0) { setCalMonth(11); setCalYear(calYear - 1); } else setCalMonth(m); }}
+            onNext={() => { const m = calMonth + 1; if (m > 11) { setCalMonth(0); setCalYear(calYear + 1); } else setCalMonth(m); }}
+            onPick={(date) => { setActiveDate(date); setTab("today"); }} />
+        )}
+      </div>
+
+      {showExport && (
+        <div onClick={() => setShowExport(false)} style={{ position: "fixed", inset: 0, background: "rgba(8,6,4,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18, zIndex: 50 }}>
+          <div className="rl-card" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, padding: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+              <span className="rl-label" style={{ fontSize: 14, color: C.cream }}>Export</span>
+              <button className="rl-link" onClick={() => setShowExport(false)}>Close</button>
+            </div>
+            <p style={{ color: C.muted, fontSize: 12.5, lineHeight: 1.5, margin: "0 0 12px" }}>Copy this, then paste into a blank Google Sheet or Excel — it splits into columns on its own.</p>
+            <textarea id="rl-csv" readOnly value={csvText} onFocus={(e) => e.target.select()}
+              style={{ width: "100%", height: 150, background: C.ink, color: C.cream, border: `1px solid ${C.line}`, borderRadius: 12, padding: 12, fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical", outline: "none" }} />
+            <button className="rl-btn rl-plus" style={{ width: "100%", padding: 14, borderRadius: 12, marginTop: 12, fontSize: 14 }} onClick={copyCSV}>{copied ? "Copied ✓" : "Copy to clipboard"}</button>
+          </div>
+        </div>
+      )}
+
+      {showConfirm && (
+        <div onClick={() => setShowConfirm(false)} style={{ position: "fixed", inset: 0, background: "rgba(8,6,4,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18, zIndex: 55 }}>
+          <div className="rl-card" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 360, padding: 24, textAlign: "center" }}>
+            <div className="rl-label" style={{ fontSize: 19, color: C.cream, marginBottom: 6 }}>Save this day?</div>
+            <p style={{ color: C.muted, fontSize: 13, margin: "0 0 20px", fontFamily: "'Inter',sans-serif" }}>{prettyDate(activeDate)}</p>
+            <button className="rl-btn rl-plus" style={{ width: "100%", padding: 15, borderRadius: 12, fontSize: 15 }} onClick={confirmSave}>Yes, save</button>
+            <button className="rl-btn rl-minus" style={{ width: "100%", padding: 13, borderRadius: 12, fontSize: 14, marginTop: 10 }} onClick={() => setShowConfirm(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {showReveal && (
+        <RevealScreen tier={revealTier} viewRep={viewRep} date={activeDate} counts={counts} onDone={() => setShowReveal(false)} />
+      )}
+    </div>
+  );
+}
+
+function Counter({ m, value, canAdd, capLabel, disabled, onBump, onSet }) {
+  const [pulse, setPulse] = useState(false);
+  const first = useRef(true);
+  useEffect(() => { if (first.current) { first.current = false; return; } setPulse(true); const t = setTimeout(() => setPulse(false), 280); return () => clearTimeout(t); }, [value]);
+  const plusOn = canAdd && !disabled;
+  return (
+    <div className="rl-card" style={{ padding: "16px 16px 18px", marginBottom: 12, opacity: disabled ? 0.88 : 1 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+        <span className="rl-label" style={{ fontSize: 13, color: C.cream }}>{m.label}</span>
+        <span style={{ fontSize: 11, color: disabled ? C.muted : canAdd ? C.muted : C.amber, fontFamily: "'Inter',sans-serif" }}>{disabled ? "view only" : canAdd ? m.hint : capLabel}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <button className="rl-btn rl-minus" disabled={disabled} style={{ width: 52, height: 52, borderRadius: 14, fontSize: 26, flexShrink: 0, opacity: disabled ? 0.3 : 1, cursor: disabled ? "not-allowed" : "pointer" }} onClick={() => onBump(-1)} aria-label={`Minus one ${m.label}`}>–</button>
+        <input className={"rl-in" + (pulse ? " rl-pulse" : "")} readOnly={disabled} style={{ fontSize: 56, color: m.key === "sold" ? C.orange : C.cream, flex: 1, minWidth: 0 }}
+          inputMode="numeric" value={value} onFocus={(e) => !disabled && e.target.select()} onChange={(e) => onSet(e.target.value)} aria-label={`${m.label} count`} />
+        <button className="rl-btn rl-plus" disabled={!plusOn} style={{ width: 64, height: 64, borderRadius: 16, fontSize: 30, flexShrink: 0, opacity: plusOn ? 1 : 0.28, cursor: plusOn ? "pointer" : "not-allowed", boxShadow: plusOn ? undefined : "none" }} onClick={() => plusOn && onBump(1)} aria-label={`Add one ${m.label}`}>+</button>
+      </div>
+    </div>
+  );
+}
+
+function Ratio({ big, label }) {
+  return (
+    <div style={{ flex: 1, padding: "16px 8px", textAlign: "center" }}>
+      <div className="rl-num" style={{ fontSize: 30, color: C.amber, lineHeight: 1 }}>{big}</div>
+      <div className="rl-label" style={{ fontSize: 9, color: C.muted, marginTop: 6, letterSpacing: "0.1em" }}>{label}</div>
+    </div>
+  );
+}
+
+function RevealScreen({ tier, viewRep, date, counts, onDone }) {
+  const cfg = REVEAL[tier] || REVEAL.green;
+  const base = cfg.base || 24;
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 60, background: cfg.bg, overflowY: "auto" }}>
+      {cfg.sheen && <div className="rl-sheen" />}
+      <div style={{ position: "relative", maxWidth: 480, margin: "0 auto", width: "100%", minHeight: "100%", padding: "42px 26px 30px", display: "flex", flexDirection: "column", boxSizing: "border-box" }}>
+        {cfg.star && (
+          <div className="rl-rise" style={{ textAlign: "center", fontSize: 60, lineHeight: 1, color: cfg.star, filter: `drop-shadow(0 0 10px ${cfg.starGlow})`, marginBottom: 2 }}>★</div>
+        )}
+        <div style={{ textAlign: "center", fontFamily: "'Oswald',sans-serif", fontWeight: 600, fontSize: 12, letterSpacing: "0.22em", textTransform: "uppercase", color: cfg.meta, opacity: 0.9, marginBottom: 6 }}>{viewRep} · {prettyDate(date)}</div>
+
+        <div className="rl-rise" style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "18px 0" }}>
+          <div className="rl-hand" style={{ textAlign: "center", color: cfg.body, lineHeight: 1.12 }}>
+            {cfg.lines.map((line, i) => (
+              <div key={i} style={{ margin: "3px 0" }}>
+                {line.map((sp, j) => (
+                  <span key={j} style={{ color: sp.c || cfg.body, fontSize: sp.s || base, textDecoration: sp.u ? "underline" : "none" }}>{sp.t}</span>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          <div style={{ marginTop: 28, background: cfg.panelBg, borderRadius: 18, padding: "16px 14px", display: "flex", textAlign: "center" }}>
+            <RevealStat n={counts.doors} l="Doors" num={cfg.panelNum} lab={cfg.panelLabel} />
+            <RevealStat n={counts.interviews} l="Interviews" num={cfg.panelNum} lab={cfg.panelLabel} />
+            <RevealStat n={counts.sold} l="Sold" num={cfg.panelNum} lab={cfg.panelLabel} />
+          </div>
+        </div>
+
+        <button className="rl-btn" onClick={onDone} style={{ width: "100%", padding: 16, borderRadius: 14, fontSize: 16, background: cfg.doneBg, color: cfg.doneText, border: cfg.doneBorder ? `1px solid ${cfg.doneBorder}` : "none" }}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+function RevealStat({ n, l, num, lab }) {
+  return (
+    <div style={{ flex: 1 }}>
+      <div className="rl-hand" style={{ fontSize: 32, color: num, lineHeight: 1 }}>{n}</div>
+      <div style={{ fontFamily: "'Oswald',sans-serif", fontWeight: 600, fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", color: lab, marginTop: 5 }}>{l}</div>
+    </div>
+  );
+}
+
+function CalendarView({ year, month, records, goals, onPrev, onNext, onPick }) {
+  const cells = monthCells(year, month);
+  const monthName = new Date(year, month, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const today = todayStr();
+  const dow = ["S", "M", "T", "W", "T", "F", "S"];
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <button className="rl-btn rl-minus" style={{ width: 44, height: 40, borderRadius: 11, fontSize: 20 }} onClick={onPrev}>‹</button>
+        <span className="rl-label" style={{ fontSize: 15, color: C.cream }}>{monthName}</span>
+        <button className="rl-btn rl-minus" style={{ width: 44, height: 40, borderRadius: 11, fontSize: 20 }} onClick={onNext}>›</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 6, marginBottom: 6 }}>
+        {dow.map((d, i) => <div key={i} className="rl-label" style={{ textAlign: "center", fontSize: 10, color: C.muted }}>{d}</div>)}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 6 }}>
+        {cells.map((d, i) => {
+          if (!d) return <div key={i} />;
+          const date = ymd(new Date(year, month, d));
+          const tier = rateDay(records[date], goals);
+          const r = RATING[tier];
+          const isToday = date === today;
+          const dark = tier !== "grey";
+          return (
+            <div key={i} className="rl-cell" onClick={() => onPick(date)}
+              style={{ background: r.bg, color: dark ? C.ink : C.muted, border: isToday ? `2px solid ${C.orange}` : `1px solid ${C.line}` }}>
+              <span>{d}</span>
+              {r.star && <span style={{ fontSize: 12, lineHeight: 1, marginTop: 1 }}>★</span>}
+            </div>
+          );
+        })}
+      </div>
+      <div className="rl-card" style={{ marginTop: 16, padding: "14px 16px" }}>
+        {[["gold", "Hit goal — effort or sales"], ["green", "70–99% of goal"], ["yellow", "40–69%"], ["red", "Under 40% — went out, cold"], ["grey", "No log / rest day"]].map(([k, desc]) => (
+          <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: k === "grey" ? 0 : 8 }}>
+            <span style={{ width: 16, height: 16, borderRadius: 5, background: RATING[k].bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: C.ink }}>{RATING[k].star ? "★" : ""}</span>
+            <span style={{ fontSize: 12, color: C.muted, fontFamily: "'Inter',sans-serif" }}>{desc}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdminView({ css, onSwitch, onEditRep }) {
+  const [target, setTarget] = useState("Derek");
+  const [g, setG] = useState(DEFAULT_GOALS);
+  const [reps, setReps] = useState([]);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const set = new Set();
+      for (const pre of ["runlocal_field_goals:", "runlocal_field_day:"]) {
+        try { const l = await window.storage.list(pre); (l && l.keys || []).forEach((k) => { const rep = k.slice(pre.length).split(":")[0]; if (rep && rep !== "admin") set.add(rep); }); } catch {}
+      }
+      Object.keys(MEM.goals).forEach((r) => { if (r !== "admin") set.add(r); });
+      if (!set.has("derek")) set.add("derek");
+      setReps([...set]);
+    })();
+  }, []);
+  useEffect(() => { if (target.trim()) loadGoals(target).then(setG); }, [target]);
+
+  async function save() { await saveGoals(target, g); setSaved(true); setTimeout(() => setSaved(false), 1600); }
+  const num = (raw) => { const n = parseInt(String(raw).replace(/[^0-9]/g, ""), 10); return isNaN(n) ? 0 : n; };
+
+  return (
+    <div className="rl-wrap" style={{ minHeight: "100vh", paddingBottom: 40 }}>
+      <style>{css}</style>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "22px 18px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+          <div>
+            <div className="rl-mark" style={{ fontSize: 24, color: C.orange }}>Run Local</div>
+            <div className="rl-eyebrow" style={{ fontSize: 9, marginTop: 2 }}>Admin</div>
+          </div>
+          <button className="rl-link" onClick={onSwitch}>Switch</button>
+        </div>
+        <div className="rl-label" style={{ fontSize: 12, color: C.muted, marginBottom: 18 }}>{prettyDate(todayStr())}</div>
+
+        <div className="rl-card" style={{ padding: 18 }}>
+          <div className="rl-label" style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>Rep</div>
+          <input className="rl-gate-in" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="Rep name" style={{ textTransform: "none", letterSpacing: "0.02em" }} />
+          {reps.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+              {reps.map((r) => (
+                <button key={r} className="rl-btn rl-minus" style={{ padding: "8px 14px", borderRadius: 999, fontSize: 12, textTransform: "capitalize", color: r.toLowerCase() === target.toLowerCase() ? C.orange : C.muted, borderColor: r.toLowerCase() === target.toLowerCase() ? C.orange : C.line }} onClick={() => setTarget(r)}>{r}</button>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
+            <div style={{ flex: 1 }}>
+              <div className="rl-label" style={{ fontSize: 10, color: C.muted, marginBottom: 8, textAlign: "center" }}>Doors goal / day</div>
+              <input className="rl-goalin" inputMode="numeric" value={g.doors} onFocus={(e) => e.target.select()} onChange={(e) => setG((x) => ({ ...x, doors: num(e.target.value) }))} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div className="rl-label" style={{ fontSize: 10, color: C.muted, marginBottom: 8, textAlign: "center" }}>Sold goal / day</div>
+              <input className="rl-goalin" inputMode="numeric" value={g.sold} onFocus={(e) => e.target.select()} onChange={(e) => setG((x) => ({ ...x, sold: num(e.target.value) }))} />
+            </div>
+          </div>
+          <button className="rl-btn rl-plus" style={{ width: "100%", padding: 16, borderRadius: 12, marginTop: 20, fontSize: 15 }} onClick={save}>{saved ? "Saved ✓" : `Save ${target || "rep"}'s goals`}</button>
+        </div>
+
+        <div className="rl-card" style={{ padding: 18, marginTop: 14 }}>
+          <div className="rl-label" style={{ fontSize: 13, color: C.cream, marginBottom: 4 }}>Edit field data</div>
+          <p style={{ color: C.muted, fontSize: 12, lineHeight: 1.5, margin: "0 0 14px", fontFamily: "'Inter',sans-serif" }}>Open a rep's full tracker to fix counts or submit on their behalf.</p>
+          <button className="rl-btn rl-plus" style={{ width: "100%", padding: 15, borderRadius: 12, fontSize: 15 }} onClick={() => onEditRep(target.trim() || "Derek")}>Edit {target.trim() || "rep"}'s data →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
